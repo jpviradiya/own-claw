@@ -1,0 +1,446 @@
+import fs from "node:fs";
+import path from "node:path";
+import { homedir } from "node:os";
+import { spawnSync } from "node:child_process";
+import type { ActionLog, AgentConfig } from "./types";
+import { ActionTracker } from "./action-tracker";
+
+const TEXT_EXT = new Set([
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".json",
+  ".md",
+  ".mdx",
+  ".css",
+  ".html",
+  ".yml",
+  ".yaml",
+  ".toml",
+  ".txt",
+]);
+
+// checks wheather given file is in our require format or not
+function isProbablyTextFile(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return TEXT_EXT.has(ext) || ext === "";
+}
+
+export class ToolExecutor {
+  constructor(
+    private readonly config: AgentConfig,
+    private readonly tracker: ActionTracker
+  ) {}
+
+  // Stores in-memory file content changes before they are written to disk.
+  // Acts like a temporary workspace. If your agent edits a file, the modified content is stored here instead of immediately overwriting the file on disk.
+  private overlay = new Map<string, string>();
+
+  // Tracks files that have been marked for deletion.
+  private deleted = new Set<string>();
+
+  // Normalizes a relative path to use forward slashes and removes any leading "./".
+  private readonly norm = (rel: string) =>
+    path.posix.normalize(rel.split(path.sep).join("/")).replace(/^\.\//, "");
+
+  // Resolves a relative path to an absolute path within the agent's codebase, ensuring that the resolved path does not escape the workspace. Throws an error if the path is outside the workspace.
+  private resolveSafe(rel: string): string {
+    const abs = path.resolve(this.config.codebasePath, rel);
+    const root = path.resolve(this.config.codebasePath);
+    const relCheck = path.relative(root, abs);
+    if (relCheck.startsWith("..") || path.isAbsolute(relCheck)) {
+      throw new Error(`Path escapes workspace: ${rel}`);
+    }
+    return abs;
+  }
+
+  // Checks if a relative path is excluded based on the agent's configuration. Returns true if the path matches any of the exclude patterns.
+  private excluded(relPath: string): boolean {
+    const norm = this.norm(relPath);
+    const segments = norm.split("/");
+    const base = segments[segments.length - 1] ?? "";
+
+    for (const pat of this.config.excludePatterns) {
+      if (pat === "*.log" && base.endsWith(".log")) return true;
+      if (pat === ".env*" && base.startsWith(".env")) return true;
+      if (pat.includes("*")) continue;
+      if (segments.includes(pat) || norm === pat || norm.startsWith(`${pat}/`))
+        return true;
+    }
+    return false;
+  }
+
+  // Asserts that a path is not excluded by the agent's configuration. Throws an error if the path is excluded.
+  private assertNotExcluded(rel: string, op: string): void {
+    if (this.excluded(rel)) {
+      throw new Error(`${op}: path is excluded by policy: ${rel}`);
+    }
+  }
+
+  // Retrieves the effective text content of a file, considering any in-memory changes or deletions. Returns undefined if the file is deleted or does not exist.
+  getEffectiveText(rel: string): string | undefined {
+    const key = this.norm(rel);
+    if (this.deleted.has(key)) return undefined;
+    if (this.overlay.has(key)) return this.overlay.get(key);
+    const abs = this.resolveSafe(rel);
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) return undefined;
+    return fs.readFileSync(abs, "utf8");
+  }
+
+  // Reads the content of a file from disk, ensuring it is not excluded and does not exceed the maximum allowed size. Logs the read operation in the action tracker.
+  readFile(rel: string): string {
+    this.assertNotExcluded(rel, "read_file");
+    const abs = this.resolveSafe(rel);
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isFile()) {
+      throw new Error(`File not found: ${rel}`);
+    }
+    const st = fs.statSync(abs);
+    if (st.size > this.config.maxFileSizeToRead) {
+      throw new Error(`File too large: ${rel}`);
+    }
+    const text = fs.readFileSync(abs, "utf8");
+    this.tracker.log({
+      type: "code_analysis",
+      path: this.norm(rel),
+      details: { after: text, toolName: "read_file" },
+      status: "executed",
+    });
+    return text;
+  }
+
+  // Creates a new file with the specified content, ensuring that file creation is allowed and the path is not excluded. If the file already exists and has not been marked for deletion, an error is thrown. The operation is logged in the action tracker.
+  createFile(rel: string, content: string): string {
+    if (!this.config.tools.allowFileCreation) throw new Error("File creation disabled");
+    this.assertNotExcluded(rel, "create_file");
+    const key = this.norm(rel);
+    const abs = this.resolveSafe(rel);
+    if (fs.existsSync(abs) && !this.deleted.has(key)) {
+      throw new Error(`create_file: already exists: ${rel}`);
+    }
+    this.deleted.delete(key);
+    this.overlay.set(key, content);
+    this.tracker.log({
+      type: "file_create",
+      path: key,
+      details: { after: content },
+      status: "pending",
+    });
+    return `Staged new file: ${key}`;
+  }
+
+  // Modifies the content of an existing file, ensuring that file modification is allowed and the path is not excluded. If the file does not exist or has been marked for deletion, an error is thrown. The operation is logged in the action tracker.
+  modifyFile(rel: string, content: string): string {
+    if (!this.config.tools.allowFileModification)
+      throw new Error("File modification disabled");
+    this.assertNotExcluded(rel, "modify_file");
+    const before = this.getEffectiveText(rel);
+    if (before === undefined) throw new Error(`modify_file: file not found: ${rel}`);
+    const key = this.norm(rel);
+    this.overlay.set(key, content);
+    this.tracker.log({
+      type: "file_modify",
+      path: key,
+      details: { before, after: content },
+      status: "pending",
+    });
+    return `Staged update: ${key}`;
+  }
+
+  // Deletes a file, ensuring that file deletion is allowed and the path is not excluded. If the file does not exist or has already been marked for deletion, an error is thrown. The operation is logged in the action tracker.
+  deleteFile(rel: string): string {
+    if (!this.config.tools.allowFileModification)
+      throw new Error("File deletion disabled");
+    this.assertNotExcluded(rel, "delete_file");
+    const before = this.getEffectiveText(rel);
+    if (before === undefined) throw new Error(`delete_file: file not found: ${rel}`);
+    const key = this.norm(rel);
+    this.overlay.delete(key);
+    this.deleted.add(key);
+    this.tracker.log({
+      type: "file_delete",
+      path: key,
+      details: { before },
+      status: "pending",
+    });
+    return `Staged delete: ${key}`;
+  }
+
+  // Creates a new folder, ensuring that folder creation is allowed and the path is not excluded. The operation is logged in the action tracker.
+  createFolder(rel: string): string {
+    if (!this.config.tools.allowFolderCreation)
+      throw new Error("Folder creation disabled");
+    this.assertNotExcluded(rel, "create_folder");
+    const key = this.norm(rel);
+    this.tracker.log({
+      type: "folder_create",
+      path: key,
+      details: { after: key },
+      status: "pending",
+    });
+    return `Staged folder: ${key}`;
+  }
+
+  // Lists files and directories at a given relative path, optionally recursively. Ensures that the path is not excluded and exists. The operation is logged in the action tracker.
+  listFiles(rel: string, recursive: boolean): string {
+    this.assertNotExcluded(rel, "list_files");
+    const abs = this.resolveSafe(rel);
+    if (!fs.existsSync(abs)) throw new Error(`list_files: not found: ${rel}`);
+
+    const lines: string[] = [];
+    const walk = (dir: string, prefix: string) => {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const ent of entries) {
+        const full = path.join(dir, ent.name);
+        const relP = path.relative(this.config.codebasePath, full);
+        if (this.excluded(relP)) continue;
+        if (ent.isDirectory()) {
+          lines.push(`${prefix}${ent.name}/`);
+          if (recursive) walk(full, `${prefix}${ent.name}/`);
+        } else {
+          lines.push(`${prefix}${ent.name}`);
+        }
+      }
+    };
+
+    if (fs.statSync(abs).isDirectory()) walk(abs, "");
+    else lines.push(path.relative(this.config.codebasePath, abs));
+
+    const out = lines.sort().join(`\n`);
+    this.tracker.log({
+      type: "code_analysis",
+      path: this.norm(rel),
+      details: { after: out, toolName: "list_files" },
+      status: "executed",
+    });
+    return out || "(empty)";
+  }
+
+  // Searches for files matching a glob pattern and optional content query, starting from a specified root relative path. Ensures that the root path is not excluded and exists. The operation is logged in the action tracker.
+  searchFiles(rootRel: string, globPattern: string, contentQuery?: string): string {
+    this.assertNotExcluded(rootRel, "search_files");
+    const rootAbs = this.resolveSafe(rootRel);
+    if (!fs.existsSync(rootAbs))
+      throw new Error(`search_files: root not found: ${rootRel}`);
+
+    const results: string[] = [];
+    const regexFromGlob = (g: string): RegExp => {
+      const escaped = g
+        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+        .replace(/\*\*/g, "§§")
+        .replace(/\*/g, "[^/\\\\]*")
+        .replace(/§§/g, ".*")
+        .replace(/\?/g, ".");
+      return new RegExp(`^${escaped}$`, "i");
+    };
+    const nameRe = regexFromGlob(globPattern.replace(/\\/g, "/"));
+
+    const walk = (dir: string) => {
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, ent.name);
+        const relP = path
+          .relative(this.config.codebasePath, full)
+          .split(path.sep)
+          .join("/");
+        if (this.excluded(relP)) continue;
+        if (ent.isDirectory()) walk(full);
+        else if (nameRe.test(relP) || nameRe.test(ent.name)) {
+          if (contentQuery) {
+            if (!isProbablyTextFile(full)) continue;
+            const text = fs.readFileSync(full, "utf8");
+            if (!text.includes(contentQuery)) continue;
+          }
+          results.push(relP);
+        }
+      }
+    };
+
+    if (fs.statSync(rootAbs).isDirectory()) walk(rootAbs);
+    else {
+      const relP = path
+        .relative(this.config.codebasePath, rootAbs)
+        .split(path.sep)
+        .join("/");
+      results.push(relP);
+    }
+
+    const out = [...new Set(results)].sort().join(`\n`);
+    this.tracker.log({
+      type: "code_analysis",
+      path: this.norm(rootRel),
+      details: { after: out || "(no matches)", toolName: "search_files" },
+      status: "executed",
+    });
+    return out || "(no matches)";
+  }
+
+  // Analyzes the codebase starting from a specified root relative path, counting the number of files and directories. Ensures that the root path is not excluded and exists. The operation is logged in the action tracker.
+  analyzeCodebase(rootRel: string): string {
+    const rootAbs = this.resolveSafe(rootRel);
+    if (!fs.existsSync(rootAbs))
+      throw new Error(`analyze_codebase: not found: ${rootRel}`);
+
+    let files = 0;
+    let dirs = 0;
+    const walk = (dir: string) => {
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, ent.name);
+        const relP = path.relative(this.config.codebasePath, full);
+        if (this.excluded(relP)) continue;
+        if (ent.isDirectory()) {
+          dirs++;
+          walk(full);
+        } else {
+          files++;
+        }
+      }
+    };
+    if (fs.statSync(rootAbs).isDirectory()) walk(rootAbs);
+    else files = 1;
+
+    const summary = `Files: ${files} | Directories: ${dirs}`;
+    this.tracker.log({
+      type: "code_analysis",
+      path: this.norm(rootRel),
+      details: { after: summary, toolName: "analyze_codebase" },
+      status: "executed",
+    });
+    return summary;
+  }
+
+  // Queues a shell command for execution, ensuring that shell execution is allowed. The operation is logged in the action tracker.
+  queueShell(command: string): string {
+    if (!this.config.tools.allowShellExecution)
+      throw new Error("Shell execution disabled");
+    this.tracker.log({
+      type: "tool_execute",
+      path: "shell",
+      details: { command, toolName: "execute_shell" },
+      status: "pending",
+    });
+    return `Shell queued: ${command}`;
+  }
+
+  // Returns the list of directories where skills are stored, including any additional directories specified in the SKILLS_DIRS environment variable. The default skill directories are also included.
+  skillRoots(): string[] {
+    const extra =
+      process.env.SKILLS_DIRS?.split(/[;]/)
+        .map((s) => s.trim())
+        .filter(Boolean) ?? [];
+    return [
+      ...extra,
+      path.join(homedir(), ".cursor/skills-cursor"),
+      path.join(homedir(), ".claude/skills"),
+    ];
+  }
+
+  // Lists all available skills by searching for SKILL.md files in the skill roots. The operation is logged in the action tracker.
+  listSkills(): string {
+    const lines: string[] = [];
+    for (const root of this.skillRoots()) {
+      if (!fs.existsSync(root)) continue;
+      const walk = (dir: string) => {
+        for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, ent.name);
+          if (ent.isDirectory()) walk(full);
+          else if (ent.name === "SKILL.md") lines.push(full);
+        }
+      };
+      walk(root);
+    }
+    const out = lines.sort().join("\n");
+    this.tracker.log({
+      type: "code_analysis",
+      path: "skills",
+      details: { after: out || "(none)", toolName: "list_skills" },
+      status: "executed",
+    });
+    return out || "(none)";
+  }
+
+  // Reads the content of a skill file, ensuring that the skill path is within the allowed skill roots. The operation is logged in the action tracker.
+  readSkill(skillPath: string): string {
+    const abs = path.isAbsolute(skillPath)
+      ? path.normalize(skillPath)
+      : path.normalize(path.resolve(this.config.codebasePath, skillPath));
+    const allowed = this.skillRoots().some((root) => {
+      const r = path.resolve(root);
+      return abs === r || abs.startsWith(r + path.sep);
+    });
+    if (!allowed) throw new Error("read_skill: outside skill roots");
+    const text = fs.readFileSync(abs, "utf8");
+    this.tracker.log({
+      type: "code_analysis",
+      path: abs,
+      details: { after: text, toolName: "read_skill" },
+      status: "executed",
+    });
+    return text;
+  }
+
+  // Applies all approved actions from the action tracker to the file system, including creating folders, modifying files, deleting files, and executing shell commands. Returns any errors encountered during the application of these actions.
+  applyApprovedFromTracker(): { errors: string[] } {
+    const errors: string[] = [];
+    const all = [...this.tracker.getLogs()];
+
+    for (const a of all.filter(
+      (x) => x.type === "folder_create" && x.status === "approved"
+    )) {
+      try {
+        fs.mkdirSync(this.resolveSafe(a.path), { recursive: true });
+      } catch (e) {
+        errors.push(String(e));
+      }
+    }
+
+    const fileOps = all
+      .filter(
+        (a) =>
+          (a.type === "file_create" ||
+            a.type === "file_modify" ||
+            a.type === "file_delete") &&
+          a.status === "approved"
+      )
+      .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+    const lastByPath = new Map<string, ActionLog>();
+    for (const a of fileOps) lastByPath.set(this.norm(a.path), a);
+
+    for (const [p, a] of lastByPath) {
+      try {
+        if (a.type === "file_delete") fs.rmSync(this.resolveSafe(p), { force: true });
+        else {
+          const target = this.resolveSafe(p);
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.writeFileSync(target, a.details.after ?? "", "utf8");
+        }
+      } catch (e) {
+        errors.push(String(e));
+      }
+    }
+
+    for (const a of all.filter(
+      (x) => x.type === "tool_execute" && x.status === "approved"
+    )) {
+      const cmd = a.details.command;
+      if (!cmd) continue;
+      const r = spawnSync(cmd, {
+        shell: true,
+        cwd: this.config.codebasePath,
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      if (r.status && r.status !== 0) errors.push(`shell exit ${r.status}: ${cmd}`);
+    }
+
+    return { errors };
+  }
+
+  // Clears the in-memory staging area for file modifications and deletions, effectively resetting the overlay and deleted sets. This does not affect the actual file system or the action tracker logs.
+  clearStaging(): void {
+    this.overlay.clear();
+    this.deleted.clear();
+  }
+}
