@@ -10,7 +10,7 @@ import { renderTerminalMarkDown } from "../../terminal-ui/terminal-md";
 import { runApprovalFlow } from "./approval";
 
 export const runAgentMode = async () => {
-  console.log(chalk.bold(`\n🤖 Agent Mode\n`));
+  console.log(chalk.bold("\n🤖 Agent Mode\n"));
 
   // user prompt
   const goal = await text({
@@ -39,7 +39,7 @@ export const runAgentMode = async () => {
     instructions: [
       `Workspace root: ${config.codebasePath}`,
       "All mutation are staged untill approval.",
-    ].join(`\n`),
+    ].join("\n"),
     tools: tools,
   });
 
@@ -68,10 +68,10 @@ export const runAgentMode = async () => {
   // apply the approved mutations and clear the staging area
   const { errors } = toolExecutor.applyApprovedFromTracker();
   if (errors.length) {
-    console.log(chalk.red(`Some operation reported error:\n`));
+    console.log(chalk.red("Some operation reported error:\n"));
     for (const e of errors) console.log(chalk.red(`  • ${e}`));
   } else {
-    console.log(chalk.green(`\n✓ Applied.\n`));
+    console.log(chalk.green("\n✓ Applied.\n"));
   }
 
   toolExecutor.clearStaging();

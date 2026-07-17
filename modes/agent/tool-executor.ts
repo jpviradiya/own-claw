@@ -208,7 +208,7 @@ export class ToolExecutor {
     if (fs.statSync(abs).isDirectory()) walk(abs, "");
     else lines.push(path.relative(this.config.codebasePath, abs));
 
-    const out = lines.sort().join(`\n`);
+    const out = lines.sort().join("\n");
     this.tracker.log({
       type: "code_analysis",
       path: this.norm(rel),
@@ -266,7 +266,7 @@ export class ToolExecutor {
       results.push(relP);
     }
 
-    const out = [...new Set(results)].sort().join(`\n`);
+    const out = [...new Set(results)].sort().join("\n");
     this.tracker.log({
       type: "code_analysis",
       path: this.norm(rootRel),

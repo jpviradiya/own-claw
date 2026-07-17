@@ -48,7 +48,7 @@ export const runWakeup = async () => {
     });
 
     if (isCancel(mode) || mode == "exit") {
-      console.log(chalk.dim(`\nGoodbye....\n`));
+      console.log(chalk.dim("\nGoodbye....\n"));
       return;
     } else if (mode == "cli") {
       await runCliModes();

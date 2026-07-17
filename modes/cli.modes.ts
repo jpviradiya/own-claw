@@ -15,16 +15,16 @@ export const runCliModes = async () => {
     });
 
     if (isCancel(mode) || mode == "back") {
-      console.log(chalk.dim(`\nGoodbye....\n`));
+      console.log(chalk.dim("\nGoodbye....\n"));
       return;
     }
 
     if (mode == "agent") {
       await runAgentMode();
     } else if (mode == "plan") {
-      console.log(chalk.dim(`\nCLI Mode/Plan Mode\n`));
+      console.log(chalk.dim("\nCLI Mode/Plan Mode\n"));
     } else if (mode == "ask") {
-      console.log(chalk.dim(`\nCLI Mode/Ask Mode\n`));
+      console.log(chalk.dim("\nCLI Mode/Ask Mode\n"));
     } else {
       console.log(chalk.yellow("Choosen mode is not implemented yet."));
     }
