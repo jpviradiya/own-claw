@@ -1,16 +1,17 @@
+import { confirm, isCancel, text } from "@clack/prompts";
+import { ToolLoopAgent, stepCountIs, tool } from "ai";
 import chalk from "chalk";
-import { isCancel, confirm, text, select } from "@clack/prompts";
-import { ToolLoopAgent, tool, stepCountIs } from "ai";
-import { trim, z } from "zod";
+import { z } from "zod";
 import { getAgentModel } from "../../ai";
-import { ActionTracker } from "../agent/action-tracker";
-import { defaultAgentConfig } from "../agent/types";
-import { ToolExecutor } from "../agent/tool-executor";
-import { createDiffieHellmanGroup } from "crypto";
 import { renderTerminalMarkDown } from "../../terminal-ui/terminal-md";
+import { ActionTracker } from "../agent/action-tracker";
 import { runApprovalFlow } from "../agent/approval";
+import { ToolExecutor } from "../agent/tool-executor";
+import { defaultAgentConfig } from "../agent/types";
+import { webSearchTools } from "../plan/web-search";
 
-const createAskTools = (executor: ToolExecutor) => {
+// Build the read-only tool set that Ask mode can use to inspect the codebase.
+const askTools = (executor: ToolExecutor) => {
   return {
     // Reads a file from the workspace.
     read_file: tool({
@@ -76,10 +77,12 @@ const createAskTools = (executor: ToolExecutor) => {
   };
 };
 
+// Format the saved Ask-mode response as a small markdown document for later review.
 const saveFileAsMd = (question: string, answer: string): string => {
   return `# Ask Mode\n\n## Question\n\n${question.trim()}\n\n## Answer\n\n${answer.trim()}\n`;
 };
 
+// Collect a question, gather an answer from the agent, and optionally save it to disk.
 export const runAskMode = async () => {
   console.log(chalk.bold("\n❓ Ask Mode\n"));
 
@@ -104,8 +107,8 @@ export const runAskMode = async () => {
 
   //
   const tools = {
-    ...createAskTools,
-    // TODO: web-search tool (firecrawl) for web scrapping
+    ...askTools(executor),
+    ...webSearchTools(tracker),
   };
 
   //

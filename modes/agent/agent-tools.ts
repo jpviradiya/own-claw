@@ -2,6 +2,7 @@ import { tool } from "ai";
 import { z } from "zod";
 import type { ToolExecutor } from "./tool-executor";
 
+// Build the tool registry used by agent mode so the model can inspect and stage workspace changes.
 export const agentTools = (executor: ToolExecutor) => {
   return {
     // Reads a file from the workspace.

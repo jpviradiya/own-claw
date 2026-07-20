@@ -4,7 +4,7 @@ import { isMutationType } from "./types";
 export class ActionTracker {
   private logs: ActionLog[] = [];
 
-  // add log entry for an action.
+  // Record a new action so the approval flow can review it later.
   log(
     entry: Omit<ActionLog, "id" | "timestamp"> & {
       id?: string;
@@ -25,17 +25,17 @@ export class ActionTracker {
     return lg;
   }
 
-  // return all logs
+  // Return the full history of tracked actions for later review or application.
   getLogs(): readonly ActionLog[] {
     return this.logs;
   }
 
-  // returns array of logs with pending status
+  // Return only the actions that are still waiting for approval.
   getPendingMutations(): ActionLog[] {
     return this.logs.filter((a) => isMutationType(a.type) && a.status === "pending");
   }
 
-  // update the status and user approval in logs of actions.
+  // Update an action's status and approval state after the user responds.
   updateStatus(id: string, status: ActionStatus, userApproved?: boolean): void {
     const a = this.logs.find((x) => x.id === id);
     if (!a) return;

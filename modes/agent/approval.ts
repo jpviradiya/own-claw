@@ -1,9 +1,9 @@
-import chalk from "chalk";
-import type { ActionTracker } from "./action-tracker";
 import { isCancel, select } from "@clack/prompts";
-import type { ActionLog } from "./types";
-import { composeBeforeAfter, formatPatch } from "./diff-view";
+import chalk from "chalk";
 import { renderTerminalMarkDown } from "../../terminal-ui/terminal-md";
+import type { ActionTracker } from "./action-tracker";
+import { composeBeforeAfter, formatPatch } from "./diff-view";
+import type { ActionLog } from "./types";
 
 interface ReviewGroup {
   label: string;
@@ -11,7 +11,7 @@ interface ReviewGroup {
   patch: string | null;
 }
 
-// Groups pending actions into review units: one group per file path (with a diff), one per folder creation, and one per shell command execution.
+// Group pending mutations into reviewable units so users can approve them file by file.
 function groupPending(pending: ActionLog[]): ReviewGroup[] {
   const byPath = new Map<string, ActionLog[]>();
   const shells: ActionLog[] = [];
@@ -65,6 +65,7 @@ function groupPending(pending: ActionLog[]): ReviewGroup[] {
   return groups;
 }
 
+// Guide the user through approving or rejecting staged changes before anything is applied.
 export const runApprovalFlow = async (tracker: ActionTracker): Promise<Boolean> => {
   //
   const pending = tracker.getPendingMutations();

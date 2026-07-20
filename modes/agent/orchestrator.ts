@@ -1,14 +1,15 @@
 import { isCancel, text } from "@clack/prompts";
-import chalk from "chalk";
-import { defaultAgentConfig } from "./types";
-import { ActionTracker } from "./action-tracker";
-import { ToolExecutor } from "./tool-executor";
-import { agentTools } from "./agent-tools";
 import { stepCountIs, ToolLoopAgent } from "ai";
+import chalk from "chalk";
 import { getAgentModel } from "../../ai";
 import { renderTerminalMarkDown } from "../../terminal-ui/terminal-md";
+import { ActionTracker } from "./action-tracker";
+import { agentTools } from "./agent-tools";
 import { runApprovalFlow } from "./approval";
+import { ToolExecutor } from "./tool-executor";
+import { defaultAgentConfig } from "./types";
 
+// Run the interactive agent workflow from a user goal through tool execution and approval.
 export const runAgentMode = async () => {
   console.log(chalk.bold("\n🤖 Agent Mode\n"));
 

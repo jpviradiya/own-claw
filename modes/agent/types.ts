@@ -37,6 +37,7 @@ export interface AgentConfig {
   };
 }
 
+// Provide the default agent settings used by the interactive modes in this project.
 export const defaultAgentConfig = (): AgentConfig => ({
   codebasePath: process.cwd(),
   maxFileSizeToRead: 1024 * 1024,
@@ -49,6 +50,7 @@ export const defaultAgentConfig = (): AgentConfig => ({
   },
 });
 
+// Distinguish mutation-style actions from read-only analysis entries.
 export function isMutationType(t: ActionType): boolean {
   return (
     t === "file_create" ||
