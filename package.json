@@ -1,9 +1,9 @@
 {
   "name": "own-claw",
-  "module": "index.ts",
+  "module": "src/index.ts",
   "private": true,
   "bin": {
-    "own-claw": "./index.ts"
+    "own-claw": "./src/index.ts"
   },
   "type": "module",
   "devDependencies": {
